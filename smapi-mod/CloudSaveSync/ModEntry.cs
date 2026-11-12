@@ -70,7 +70,8 @@ public sealed class ModEntry : Mod, ISyncHost
             this.Helper.WriteConfig(this.config);
             this.Monitor.Log($"已自动选择同步存档: {id}（可在 config.json 的 SaveId 修改）", LogLevel.Info);
         }
-        var api = new ApiClient(this.config.ServerUrl, this.config.Token);
+        var api = new ApiClient(this.config.ServerUrl, this.config.Token, this.config.Proxy, msg => this.Monitor.Log(msg, LogLevel.Info));
+        this.Monitor.Log(api.ProxyInUse != null ? $"连接服务器经由代理 {api.ProxyInUse}（Proxy={this.config.Proxy}）" : "直连服务器", LogLevel.Debug);
         this.engine = new SyncEngine(this, api, Path.Combine(this.Helper.DirectoryPath, "data"), id);
         return this.engine;
     }
@@ -324,7 +325,7 @@ public sealed class ModEntry : Mod, ISyncHost
                         break;
                     case "test":
                         this.deviceName = await eng.Api.WhoAmI(ct);
-                        this.Monitor.Log($"连接正常，设备名: {this.deviceName}", LogLevel.Info);
+                        this.Monitor.Log($"连接正常，设备名: {this.deviceName}（{(eng.Api.ProxyInUse is { } px ? "经由代理 " + px : "直连")}）", LogLevel.Info);
                         break;
                     default:
                         this.Monitor.Log("用法: cloudsync status | sync | push | pull | revisions | restore <rev> | test", LogLevel.Info);
