@@ -70,9 +70,15 @@ docker compose down --rmi all && cd / && sudo rm -rf /opt/stardew-sync   # 卸�
      "Token": "sds_...（pc 的 token）",
      "SaveId": "农场名_123456789",
      "AutoDownload": true,
+     "Proxy": "auto",
      "PlayLock": true
    }
    ```
+   `Proxy` 的取值：
+   - `auto`（默认）：使用系统代理（Clash / FlClash 等设置的 Windows 系统代理，或 `HTTPS_PROXY` 环境变量）；代理没开、连不上时自动改为直连
+   - `none`：始终直连
+   - `system`：只走系统代理
+   - `http://127.0.0.1:7890`：指定代理地址
    `SaveId` 是 `%AppData%\StardewValley\Saves\` 下的文件夹名。只有一个存档时可以留空，会自动识别。
 4. 在 SMAPI 控制台输入 `cloudsync test`，确认连接正常。
 

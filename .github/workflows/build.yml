@@ -84,7 +84,7 @@ jobs:
           export SYNC_DATA_DIR=/tmp/srvdata
           TA=$(/tmp/srv token add pc | awk '/token:/{print $2}')
           TB=$(/tmp/srv token add android | awk '/token:/{print $2}')
-          SYNC_LISTEN=127.0.0.1:37999 /tmp/srv serve & sleep 1
+          SYNC_LISTEN=:37999 /tmp/srv serve & sleep 1
           dotnet run --project smapi-mod/CloudSaveSync.Tests -- http://127.0.0.1:37999 "$TA" "$TB"
       - name: Package
         run: |

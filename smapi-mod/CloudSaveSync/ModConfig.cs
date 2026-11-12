@@ -14,6 +14,12 @@ public sealed class ModConfig
     /// <summary>在标题界面时自动下载云端更新。</summary>
     public bool AutoDownload { get; set; } = true;
 
+    /// <summary>
+    /// 代理："auto"（默认：用系统代理，代理连不上时自动直连）、"system"（只走系统代理）、
+    /// "none"（始终直连）、或指定地址如 "http://127.0.0.1:7890"。
+    /// </summary>
+    public string Proxy { get; set; } = "auto";
+
     /// <summary>启用游玩锁提示。</summary>
     public bool PlayLock { get; set; } = true;
 }
