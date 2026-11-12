@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Self-check harness: runs SaveFormat/SyncEngine against a live stardew-sync server.
+       usage: dotnet run [serverUrl tokenA tokenB]  (no args = offline checks only) -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../CloudSaveSync/SaveFormat.cs" />
+    <Compile Include="../CloudSaveSync/ApiClient.cs" />
+    <Compile Include="../CloudSaveSync/SyncEngine.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Build: dotnet build -c Release -p:SmapiPath=<folder containing StardewModdingAPI.dll>
+    Only SMAPI is referenced; game types are accessed via reflection (GameUi.cs),
+    so the game itself is not needed to compile.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>CloudSaveSync</AssemblyName>
+    <RootNamespace>CloudSaveSync</RootNamespace>
+    <Version>0.1.0</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <SmapiPath Condition="'$(SmapiPath)' == ''">$(MSBuildThisFileDirectory)../lib</SmapiPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="StardewModdingAPI">
+      <HintPath>$(SmapiPath)/StardewModdingAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SMAPI.Toolkit.CoreInterfaces">
+      <HintPath>$(SmapiPath)/smapi-internal/SMAPI.Toolkit.CoreInterfaces.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="manifest.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

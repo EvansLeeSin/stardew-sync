@@ -1,0 +1,9 @@
+/dist/
+/data/
+deploy/data/
+deploy/.env
+android-module/bin/
+smapi-mod/lib/
+smapi-mod/**/bin/
+smapi-mod/**/obj/
+*.exe

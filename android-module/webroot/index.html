@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stardew Sync</title>
+<style>
+  :root { --bg:#f4efe1; --card:#fffaf0; --fg:#3b2f1e; --muted:#8a7a60; --acc:#5a8f29; --warn:#c27a00; --err:#b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1d1a14; --card:#2a251c; --fg:#efe6d2; --muted:#a8997c; } }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:16px; padding-top: calc(16px + env(safe-area-inset-top)); font-family:system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  h1 { font-size:20px; margin:0 0 12px; }
+  h2 { font-size:15px; margin:0 0 8px; color:var(--muted); font-weight:600; }
+  .card { background:var(--card); border-radius:12px; padding:14px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .row { display:flex; justify-content:space-between; gap:8px; padding:3px 0; font-size:14px; }
+  .row span:first-child { color:var(--muted); white-space:nowrap; }
+  .row span:last-child { text-align:right; word-break:break-all; }
+  button { border:0; border-radius:8px; padding:9px 14px; font-size:14px; background:var(--acc); color:#fff; margin:4px 4px 0 0; }
+  button.sec { background:transparent; color:var(--acc); border:1px solid var(--acc); }
+  button.warn { background:var(--warn); }
+  button:disabled { opacity:.5; }
+  input { width:100%; padding:8px; border-radius:8px; border:1px solid var(--muted); background:transparent; color:var(--fg); font-size:14px; margin:2px 0 8px; }
+  label { font-size:13px; color:var(--muted); }
+  .ok { color:var(--acc); } .warnc { color:var(--warn); } .errc { color:var(--err); }
+  .conflict { border:2px solid var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td { padding:6px 4px; border-bottom:1px solid rgba(128,128,128,.2); }
+  #toast { position:fixed; left:16px; right:16px; bottom:24px; background:#333; color:#fff; padding:10px 14px; border-radius:8px; font-size:14px; display:none; }
+  pre { white-space:pre-wrap; font-size:11px; max-height:260px; overflow:auto; background:rgba(0,0,0,.05); padding:8px; border-radius:8px; }
+</style>
+</head>
+<body>
+<h1>🌱 Stardew Sync</h1>
+
+<div id="conflictCard" class="card conflict" style="display:none">
+  <h2>⚠ 存档冲突</h2>
+  <div id="conflictBody"></div>
+  <button class="warn" onclick="act('push','确定用【本机存档】覆盖云端？')">保留本机</button>
+  <button class="warn" onclick="act('pull','确定用【云端存档】覆盖本机？（本机会先备份）')">保留云端</button>
+</div>
+
+<div class="card">
+  <h2>状态</h2>
+  <div id="status">加载中…</div>
+  <button onclick="act('sync')">立即同步</button>
+  <button class="sec" onclick="refresh()">刷新</button>
+  <button class="sec" id="daemonBtn" onclick="toggleDaemon()">守护进程</button>
+</div>
+
+<div class="card">
+  <h2>历史版本</h2>
+  <button class="sec" onclick="loadRevs()">加载</button>
+  <table id="revs"></table>
+</div>
+
+<div class="card">
+  <h2>设置</h2>
+  <label>服务器地址</label><input id="server_url" placeholder="https://stardew.example.com">
+  <label>Token（留空则不修改）</label><input id="token" type="password" placeholder="sds_...">
+  <label>存档 ID（文件夹名，留空自动识别唯一存档）</label><input id="save_id" placeholder="Farm_123456789">
+  <label><input type="checkbox" id="auto_download" style="width:auto"> 游戏未运行时自动应用云端新存档</label><br>
+  <label><input type="checkbox" id="notify" style="width:auto"> 系统通知</label><br>
+  <button onclick="saveCfg()">保存</button>
+  <button class="sec" onclick="act('test')">测试连接</button>
+</div>
+
+<div class="card">
+  <h2>日志</h2>
+  <button class="sec" onclick="loadLog()">查看最近日志</button>
+  <pre id="log" style="display:none"></pre>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const MOD = '/data/adb/modules/stardew-sync';
+const BIN = MOD + '/bin/stardew-sync -data /data/adb/stardew-sync';
+let cbId = 0;
+
+function exec(cmd) {
+  return new Promise((resolve) => {
+    if (typeof ksu === 'undefined') { resolve({ errno: -1, stdout: '', stderr: 'ksu API 不可用（请在 KernelSU 管理器中打开）' }); return; }
+    const name = 'cb_' + (++cbId) + '_' + Date.now();
+    window[name] = (errno, stdout, stderr) => { delete window[name]; resolve({ errno, stdout, stderr }); };
+    ksu.exec(cmd, '{}', name);
+  });
+}
+async function cli(args) {
+  const r = await exec(BIN + ' ' + args);
+  try { return JSON.parse(r.stdout); } catch (e) { return { ok: false, error: (r.stderr || r.stdout || 'exec failed').trim() }; }
+}
+const q = s => "'" + String(s).replace(/'/g, "'\\''") + "'";
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+function toast(msg, ms = 3000) { const t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ms); }
+function row(k, v, cls = '') { return `<div class="row"><span>${esc(k)}</span><span class="${cls}">${v}</span></div>`; }
+function ago(ts) { if (!ts || ts.startsWith('0001')) return '—'; const s = (Date.now() - new Date(ts)) / 1000; if (s < 60) return Math.round(s) + ' 秒前'; if (s < 3600) return Math.round(s / 60) + ' 分钟前'; if (s < 86400) return Math.round(s / 3600) + ' 小时前'; return new Date(ts).toLocaleString(); }
+
+let daemonAlive = false;
+async function refresh() {
+  const s = await cli('status');
+  const el = document.getElementById('status');
+  if (!s.ok) { el.innerHTML = `<span class="errc">${esc(s.error)}</span>`; return; }
+  daemonAlive = s.daemon && s.daemon.alive;
+  document.getElementById('daemonBtn').textContent = daemonAlive ? '停止守护进程' : '启动守护进程';
+  let h = '';
+  h += row('守护进程', daemonAlive ? '运行中' : '未运行', daemonAlive ? 'ok' : 'errc');
+  if (!s.configured) h += row('配置', '未配置服务器 / Token', 'warnc');
+  h += row('游戏', (s.game_running ? '运行中' : '未运行') + (s.game_version ? ' · v' + esc(s.game_version) : ''));
+  h += row('存档', s.save_id ? esc(s.save_id) : `<span class="warnc">${esc(s.save_id_error || '')}${s.local_saves ? '<br>本地: ' + esc(s.local_saves.join(', ')) : ''}</span>`);
+  if (s.local) h += row('本机进度', esc(s.local.game_date) + ' · ' + esc(s.local.played) + (s.local.changed ? ' <span class="warnc">(未上传)</span>' : ''));
+  if (s.remote && s.remote.latest) {
+    const r = s.remote.latest;
+    h += row('云端进度', `#${r.rev} ${esc(r.game_date)} · ${esc(r.device)} · ${ago(r.uploaded_at)}`);
+  } else if (s.remote_error) {
+    h += row('云端', s.remote_error.includes('not found') ? '暂无存档' : esc(s.remote_error), 'warnc');
+  }
+  const lk = (s.remote && s.remote.lock) || (s.daemon.info && s.daemon.info.other_lock);
+  const mine = s.daemon.info && s.daemon.info.holding_lock;
+  if (lk) h += row('游玩锁', `${mine ? '本机' : esc(lk.holder)} · ${ago(lk.last_heartbeat)}`, mine ? 'ok' : 'warnc');
+  const st = s.state || {};
+  h += row('基线版本', st.base_revision ? '#' + st.base_revision : '—');
+  if (st.pending_remote) h += row('待应用', '#' + st.pending_remote, 'warnc');
+  h += row('上次检查', ago(st.last_sync));
+  if (st.last_action) h += row('最近操作', esc(st.last_action));
+  if (st.last_error) h += row('错误', esc(st.last_error), 'errc');
+  el.innerHTML = h;
+
+  const cc = document.getElementById('conflictCard');
+  if (st.conflict) {
+    const c = st.conflict;
+    document.getElementById('conflictBody').innerHTML =
+      row('本机', `${esc(c.local_game_date)} · ${esc(c.local_played)}`) +
+      row('云端', `#${c.remote_rev} ${esc(c.remote_game_date)} · ${esc(c.remote_played)} · ${esc(c.remote_device)}`);
+    cc.style.display = '';
+  } else cc.style.display = 'none';
+}
+
+async function act(cmd, confirmMsg) {
+  if (confirmMsg && !confirm(confirmMsg)) return;
+  toast('执行中…', 60000);
+  const r = await cli(cmd);
+  toast(r.ok ? (r.message || (r.device ? '连接成功，设备名: ' + r.device : '完成')) : '失败: ' + r.error, 5000);
+  refresh();
+}
+
+async function loadRevs() {
+  const r = await cli('revisions');
+  const t = document.getElementById('revs');
+  if (!Array.isArray(r)) { t.innerHTML = `<tr><td class="errc">${esc(r.error)}</td></tr>`; return; }
+  t.innerHTML = r.map(v => `<tr><td>#${v.rev}${v.restored_from ? ' ↺' + v.restored_from : ''}</td><td>${esc(v.game_date)}<br><small>${esc(v.device)} · ${ago(v.uploaded_at)}</small></td><td><button class="sec" onclick="restore(${v.rev})">回滚</button></td></tr>`).join('') || '<tr><td>暂无</td></tr>';
+}
+async function restore(rev) {
+  if (!confirm(`回滚到 #${rev}？\n云端会新建一个与 #${rev} 相同的版本，并覆盖本机存档（本机先备份）。`)) return;
+  await act('restore ' + rev);
+  loadRevs();
+}
+
+async function loadCfg() {
+  const r = await cli('config get');
+  if (!r.ok) return;
+  const c = r.config;
+  document.getElementById('server_url').value = c.server_url || '';
+  document.getElementById('save_id').value = c.save_id || '';
+  document.getElementById('token').placeholder = r.has_token ? '已设置（留空不修改）' : 'sds_...';
+  document.getElementById('auto_download').checked = !!c.auto_download;
+  document.getElementById('notify').checked = !!c.notify;
+}
+async function saveCfg() {
+  const v = id => document.getElementById(id).value.trim();
+  const sets = [['server_url', v('server_url')], ['save_id', v('save_id')],
+    ['auto_download', document.getElementById('auto_download').checked], ['notify', document.getElementById('notify').checked]];
+  if (v('token')) sets.push(['token', v('token')]);
+  for (const [k, val] of sets) {
+    const r = await cli(`config set ${k} ${q(val)}`);
+    if (!r.ok) { toast('保存失败: ' + r.error, 5000); return; }
+  }
+  document.getElementById('token').value = '';
+  toast('已保存，守护进程会自动重新加载');
+  loadCfg(); setTimeout(refresh, 1500);
+}
+async function toggleDaemon() {
+  const r = await exec(`sh ${MOD}/daemon.sh ${daemonAlive ? 'stop' : 'start'}`);
+  toast(r.stdout.trim() || r.stderr.trim());
+  setTimeout(refresh, 2000);
+}
+async function loadLog() {
+  const r = await exec('tail -n 80 /data/adb/stardew-sync/sync.log');
+  const p = document.getElementById('log');
+  p.style.display = ''; p.textContent = r.stdout || r.stderr || '(空)';
+}
+
+loadCfg(); refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

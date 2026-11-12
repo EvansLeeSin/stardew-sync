@@ -1,0 +1,6 @@
+id=stardew-sync
+name=Stardew Sync
+version=v0.0.0
+versionCode=1
+author=EvansLeeSin
+description=星露谷物语存档云同步（PC ↔ Android）。在 WebUI 中配置服务器地址与 Token。
