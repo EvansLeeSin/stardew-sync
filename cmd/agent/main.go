@@ -35,6 +35,7 @@ import (
 var version = "dev"
 
 func main() {
+	setupCARoots()
 	dataDir := flag.String("data", "/data/adb/stardew-sync", "data directory")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: stardew-sync [-data dir] daemon|status|sync|push|pull|revisions|restore <rev>|config get|config set <k> <v>|test|version")
