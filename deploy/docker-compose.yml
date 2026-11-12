@@ -1,0 +1,21 @@
+# 部署：复制本目录到 /opt/stardew-sync，cp .env.example .env，然后 docker compose up -d
+# 端口只绑定 127.0.0.1，由宿主机上的 cloudflared Tunnel 转发：
+#   Public Hostname -> http://127.0.0.1:${SYNC_PORT}
+services:
+  sync:
+    image: ghcr.io/evansleesin/stardew-sync-server:${SYNC_IMAGE_TAG:-latest}
+    container_name: stardew-sync
+    restart: unless-stopped
+    user: "${SYNC_UID:-10001}:${SYNC_GID:-10001}"
+    ports:
+      - "127.0.0.1:${SYNC_PORT:-37821}:8080"
+    environment:
+      SYNC_KEEP_REVISIONS: ${SYNC_KEEP_REVISIONS:-30}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

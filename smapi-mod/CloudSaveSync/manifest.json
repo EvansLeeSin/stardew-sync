@@ -1,0 +1,10 @@
+{
+  "Name": "Cloud Save Sync",
+  "Author": "EvansLeeSin",
+  "Version": "0.1.0",
+  "Description": "将单个存档同步到自建 stardew-sync 服务器（PC ↔ Android）。",
+  "UniqueID": "EvansLeeSin.CloudSaveSync",
+  "EntryDll": "CloudSaveSync.dll",
+  "MinimumApiVersion": "4.0.0",
+  "UpdateKeys": []
+}

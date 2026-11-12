@@ -1,0 +1,149 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SMAPI_VERSION: "4.5.2"
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - run: go vet ./...
+      - run: go test ./...
+      - run: GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go vet ./...
+
+      - name: Version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-${GITHUB_SHA::7}"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Build Android module
+        run: |
+          V=${{ steps.ver.outputs.version }}
+          mkdir -p dist android-module/bin
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$V" -o android-module/bin/stardew-sync ./cmd/agent
+          CODE=$(date +%s)
+          sed -i "s/^version=.*/version=v$V/; s/^versionCode=.*/versionCode=$((CODE/60))/" android-module/module.prop
+          # shell scripts must use LF
+          sed -i 's/\r$//' android-module/*.sh
+          (cd android-module && zip -r ../dist/stardew-sync-android.zip . -x '.gitkeep')
+
+      - name: Build server binaries
+        run: |
+          V=${{ steps.ver.outputs.version }}
+          for a in amd64 arm64; do
+            GOOS=linux GOARCH=$a CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o dist/stardew-sync-server-linux-$a ./cmd/server
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-dist
+          path: dist/
+
+  smapi-mod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Fetch SMAPI reference assemblies
+        run: |
+          curl -sSL -o smapi.zip "https://github.com/Pathoschild/SMAPI/releases/download/${SMAPI_VERSION}/SMAPI-${SMAPI_VERSION}-installer.zip"
+          unzip -q smapi.zip -d smapi
+          unzip -q -o "smapi/SMAPI ${SMAPI_VERSION} installer/internal/windows/install.dat" -d smapi-lib
+          ls smapi-lib/StardewModdingAPI.dll smapi-lib/smapi-internal/SMAPI.Toolkit.CoreInterfaces.dll
+      - name: Set version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.1.0"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          sed -i "s/\"Version\": \"[^\"]*\"/\"Version\": \"$V\"/" smapi-mod/CloudSaveSync/manifest.json
+      - name: Build mod
+        run: dotnet build smapi-mod/CloudSaveSync/CloudSaveSync.csproj -c Release -p:SmapiPath=$PWD/smapi-lib -p:Version=${{ steps.ver.outputs.version }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Cross-language test (C# engine vs Go server)
+        run: |
+          go build -o /tmp/srv ./cmd/server
+          export SYNC_DATA_DIR=/tmp/srvdata
+          TA=$(/tmp/srv token add pc | awk '/token:/{print $2}')
+          TB=$(/tmp/srv token add android | awk '/token:/{print $2}')
+          SYNC_LISTEN=127.0.0.1:37999 /tmp/srv serve & sleep 1
+          dotnet run --project smapi-mod/CloudSaveSync.Tests -- http://127.0.0.1:37999 "$TA" "$TB"
+      - name: Package
+        run: |
+          mkdir -p dist/CloudSaveSync
+          cp smapi-mod/CloudSaveSync/bin/Release/net6.0/{CloudSaveSync.dll,CloudSaveSync.pdb,manifest.json} dist/CloudSaveSync/
+          (cd dist && zip -r CloudSaveSync.zip CloudSaveSync && rm -rf CloudSaveSync)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smapi-mod
+          path: dist/
+
+  docker:
+    needs: go
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/stardew-sync-server
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=edge,branch=main
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [go, smapi-mod, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/stardew-sync-android.zip
+            dist/CloudSaveSync.zip
+            dist/stardew-sync-server-linux-amd64
+            dist/stardew-sync-server-linux-arm64
+          generate_release_notes: true
