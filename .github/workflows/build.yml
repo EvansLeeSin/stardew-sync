@@ -121,6 +121,9 @@ jobs:
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=edge,branch=main
       - uses: docker/build-push-action@v6
+        env:
+          # don't upload the *.dockerbuild record artifact (breaks download-artifact in the release job)
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -135,10 +138,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      # download only our own artifacts by name (skip *.dockerbuild records etc.)
       - uses: actions/download-artifact@v4
         with:
+          name: go-dist
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: smapi-mod
+          path: dist
+      - run: ls -la dist
       - uses: softprops/action-gh-release@v2
         with:
           files: |
