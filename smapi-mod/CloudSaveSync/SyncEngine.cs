@@ -94,6 +94,9 @@ public sealed class SyncEngine
 
     public SaveFormat.Snapshot? LocalSnapshot() => SaveFormat.ReadDir(this.LocalDir, this.SaveId);
 
+    /// <summary>Metadata only (reads SaveGameInfo, not the multi-MB main save).</summary>
+    public SaveFormat.Meta? LocalMeta() => SaveFormat.ReadInfo(this.LocalDir);
+
     private async Task<SyncResult> Locked(Func<Task<SyncResult>> fn, CancellationToken ct)
     {
         await this.gate.WaitAsync(ct).ConfigureAwait(false);

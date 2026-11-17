@@ -290,3 +290,13 @@ func parseVersion(v string) ([3]int, bool) {
 	}
 	return out, n > 0
 }
+
+// ReadInfo parses only <dir>/SaveGameInfo (small), without reading the main
+// save file. Use it when only metadata (e.g. the in-game date) is needed.
+func ReadInfo(dir string) (Meta, error) {
+	info, err := os.ReadFile(filepath.Join(dir, InfoFile))
+	if err != nil {
+		return Meta{}, err
+	}
+	return ParseInfo(info)
+}

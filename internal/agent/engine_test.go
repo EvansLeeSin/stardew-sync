@@ -18,14 +18,16 @@ import (
 const sid = "Sunny_123"
 
 type mockPlat struct {
-	running bool
-	version string
-	notes   []string
+	running   bool
+	screenOff bool
+	version   string
+	notes     []string
 }
 
-func (m *mockPlat) GameRunning() bool   { return m.running }
-func (m *mockPlat) GameVersion() string { return m.version }
-func (m *mockPlat) Notify(t, s string)  { m.notes = append(m.notes, t+": "+s) }
+func (m *mockPlat) GameRunning() bool      { return m.running }
+func (m *mockPlat) GameVersion() string    { return m.version }
+func (m *mockPlat) Notify(t, s string)     { m.notes = append(m.notes, t+": "+s) }
+func (m *mockPlat) ScreenOn() (bool, bool) { return !m.screenOff, true }
 func (m *mockPlat) Apply(dir, id string, a *savefmt.Archive) error {
 	return applyReplace(dir, id, a)
 }

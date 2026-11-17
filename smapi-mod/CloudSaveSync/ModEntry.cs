@@ -146,7 +146,7 @@ public sealed class ModEntry : Mod, ISyncHost
         if (++this.heartbeatCounter < 60) return;
         this.heartbeatCounter = 0;
         var eng = this.engine!;
-        string date = eng.LocalSnapshot()?.Meta.GameDate ?? "";
+        string date = eng.LocalMeta()?.GameDate ?? "";
         Task.Run(async () =>
         {
             try

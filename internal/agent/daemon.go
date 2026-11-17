@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/EvansLeeSin/stardew-sync/internal/api"
@@ -20,10 +22,13 @@ type DaemonStatus struct {
 	StartedAt   time.Time `json:"started_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	GameRunning bool      `json:"game_running"`
+	ScreenOn    bool      `json:"screen_on"`
 	HoldingLock bool      `json:"holding_lock"`
 	OtherLock   *api.Lock `json:"other_lock,omitempty"`
 	Online      bool      `json:"online"`
-	LastError   string    `json:"last_error,omitempty"`
+	// RetryAt is set while network requests are backing off after failures.
+	RetryAt   *time.Time `json:"retry_at,omitempty"`
+	LastError string     `json:"last_error,omitempty"`
 }
 
 func daemonStatusPath(dataDir string) string { return filepath.Join(dataDir, "daemon.json") }
@@ -39,9 +44,95 @@ func LoadDaemonStatus(dataDir string) (*DaemonStatus, error) {
 
 const (
 	pollInterval   = 5 * time.Second
-	periodicSync   = 10 * time.Minute
 	settleDuration = 5 * time.Second
+	// periodicSync is only a safety net; remote changes arrive via long-poll and
+	// local changes only happen while the game runs (handled on game exit).
+	periodicSync = time.Hour
+	// statusHeartbeat: daemon.json is rewritten at least this often so the
+	// WebUI can tell the daemon is alive (it treats >1min stale as dead).
+	statusHeartbeat = 30 * time.Second
+	// screenCheckInterval: how often the screen state is sampled.
+	screenCheckInterval = 10 * time.Second
+
+	backoffMin = 30 * time.Second
+	backoffMax = 10 * time.Minute
 )
+
+// Backoff is an exponential backoff shared by all network calls of the daemon.
+type Backoff struct {
+	mu      sync.Mutex
+	fails   int
+	until   time.Time
+	lastErr string
+	now     func() time.Time
+}
+
+func (b *Backoff) clock() time.Time {
+	if b.now != nil {
+		return b.now()
+	}
+	return time.Now()
+}
+
+// Delay for the n-th consecutive failure: 30s, 1m, 2m, 4m, 8m, 10m, ...
+func backoffDelay(fails int) time.Duration {
+	d := backoffMin
+	for i := 1; i < fails && d < backoffMax; i++ {
+		d *= 2
+	}
+	if d > backoffMax {
+		d = backoffMax
+	}
+	return d
+}
+
+// Fail records a failure. Returns the wait and whether this is the first
+// failure of a streak (callers log only then, to avoid log spam).
+func (b *Backoff) Fail(err error) (time.Duration, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err != nil {
+		b.lastErr = err.Error()
+	}
+	b.fails++
+	d := backoffDelay(b.fails)
+	b.until = b.clock().Add(d)
+	return d, b.fails == 1
+}
+
+// Success resets the backoff. Returns true if it was failing before.
+func (b *Backoff) Success() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	was := b.fails > 0
+	b.fails, b.until, b.lastErr = 0, time.Time{}, ""
+	return was
+}
+
+// LastError returns the error of the current failure streak ("" when healthy).
+func (b *Backoff) LastError() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastErr
+}
+
+// Ready reports whether a network call may be attempted now.
+func (b *Backoff) Ready() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !b.clock().Before(b.until)
+}
+
+// Until returns the retry time while backing off.
+func (b *Backoff) Until() *time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.fails == 0 {
+		return nil
+	}
+	t := b.until
+	return &t
+}
 
 type fileSig struct {
 	size  int64
@@ -60,6 +151,16 @@ type Daemon struct {
 	status    DaemonStatus
 	remoteSig chan struct{}
 	pollStop  context.CancelFunc
+	backoff   Backoff
+
+	// screen state, written by the main loop, read by the poller
+	screenMu   sync.Mutex
+	screenOn   bool
+	screenWake chan struct{}
+
+	lastStatusJSON []byte
+	lastStatusAt   time.Time
+	localErr       string // non-network error (config, local files); main loop only
 }
 
 func (d *Daemon) reloadConfig() (bool, error) {
@@ -75,13 +176,74 @@ func (d *Daemon) reloadConfig() (bool, error) {
 	return true, nil
 }
 
+// writeStatus writes daemon.json only when the content changed or the
+// heartbeat interval elapsed (instead of every loop iteration).
 func (d *Daemon) writeStatus() {
+	d.status.RetryAt = d.backoff.Until()
+	d.status.Online = d.status.RetryAt == nil
+	if e := d.backoff.LastError(); e != "" {
+		d.status.LastError = e
+	} else if d.localErr != "" {
+		d.status.LastError = d.localErr
+	} else {
+		d.status.LastError = ""
+	}
+	cmp := d.status
+	cmp.UpdatedAt = time.Time{}
+	b, _ := json.Marshal(cmp)
+	if bytes.Equal(b, d.lastStatusJSON) && time.Since(d.lastStatusAt) < statusHeartbeat {
+		return
+	}
 	d.status.UpdatedAt = time.Now()
-	b, _ := json.MarshalIndent(d.status, "", "  ")
-	writeAtomic(daemonStatusPath(d.DataDir), b, 0o600)
+	out, _ := json.MarshalIndent(d.status, "", "  ")
+	if err := writeAtomic(daemonStatusPath(d.DataDir), out, 0o600); err == nil {
+		d.lastStatusJSON, d.lastStatusAt = b, time.Now()
+	}
 }
 
-// startPoller runs the long-poll loop that signals remote changes.
+func (d *Daemon) setScreen(on bool) (changed bool) {
+	d.screenMu.Lock()
+	defer d.screenMu.Unlock()
+	if d.screenOn == on {
+		return false
+	}
+	d.screenOn = on
+	if on {
+		close(d.screenWake)
+	} else {
+		d.screenWake = make(chan struct{})
+	}
+	return true
+}
+
+// waitScreenOn blocks while the screen is off. Returns false if ctx is done.
+func (d *Daemon) waitScreenOn(ctx context.Context) bool {
+	d.screenMu.Lock()
+	on, wake := d.screenOn, d.screenWake
+	d.screenMu.Unlock()
+	if on {
+		return true
+	}
+	select {
+	case <-wake:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// waitBackoff blocks until the backoff allows another attempt.
+func (d *Daemon) waitBackoff(ctx context.Context) bool {
+	if t := d.backoff.Until(); t != nil {
+		if w := time.Until(*t); w > 0 {
+			sleepCtx(ctx, w)
+		}
+	}
+	return ctx.Err() == nil
+}
+
+// startPoller runs the long-poll loop that signals remote changes. It pauses
+// while the screen is off and backs off on network errors.
 func (d *Daemon) startPoller(ctx context.Context) {
 	if d.pollStop != nil {
 		d.pollStop()
@@ -92,6 +254,9 @@ func (d *Daemon) startPoller(ctx context.Context) {
 	go func() {
 		seen := -1
 		for pctx.Err() == nil {
+			if !d.waitScreenOn(pctx) || !d.waitBackoff(pctx) {
+				return
+			}
 			id, err := eng.SaveID()
 			if err != nil {
 				sleepCtx(pctx, time.Minute)
@@ -101,14 +266,23 @@ func (d *Daemon) startPoller(ctx context.Context) {
 				st, _ := LoadState(d.DataDir)
 				seen = st.BaseRevision
 			}
-			sum, changed, err := eng.Client.Wait(pctx, id, seen, api.DefaultWaitTimout)
+			// Abort the long-poll as soon as the screen turns off.
+			wctx, wcancel := context.WithCancel(pctx)
+			stopWatch := d.cancelOnScreenOff(wctx, wcancel)
+			sum, changed, err := eng.Client.Wait(wctx, id, seen, api.DefaultWaitTimout)
+			stopWatch()
+			screenOffAbort := wctx.Err() != nil && pctx.Err() == nil
+			wcancel()
+			if screenOffAbort {
+				continue // paused by screen off; not a network failure
+			}
 			if err != nil {
 				if pctx.Err() == nil {
-					d.Log.Printf("long-poll: %v", err)
-					sleepCtx(pctx, 30*time.Second)
+					d.netFail("long-poll", err)
 				}
 				continue
 			}
+			d.netOK()
 			if changed && sum.Latest != nil {
 				seen = sum.Latest.Rev
 				select {
@@ -118,6 +292,47 @@ func (d *Daemon) startPoller(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// cancelOnScreenOff cancels the long-poll when the screen turns off.
+func (d *Daemon) cancelOnScreenOff(ctx context.Context, cancel context.CancelFunc) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				d.screenMu.Lock()
+				on := d.screenOn
+				d.screenMu.Unlock()
+				if !on {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// netFail / netOK only touch the (locked) backoff and the logger, so they are
+// safe to call from the long-poll goroutine.
+func (d *Daemon) netFail(what string, err error) {
+	wait, first := d.backoff.Fail(err)
+	if first {
+		d.Log.Printf("%s: %v（%v 后重试，之后逐步延长，最长 %v）", what, err, wait, backoffMax)
+	}
+}
+
+func (d *Daemon) netOK() {
+	if d.backoff.Success() {
+		d.Log.Print("network recovered")
+	}
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) {
@@ -132,16 +347,21 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 // Run blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.remoteSig = make(chan struct{}, 1)
-	d.status = DaemonStatus{PID: os.Getpid(), StartedAt: time.Now()}
+	d.screenOn, d.screenWake = true, make(chan struct{})
+	close(d.screenWake)
+	d.status = DaemonStatus{PID: os.Getpid(), StartedAt: time.Now(), ScreenOn: true}
 	d.Log.Printf("daemon started pid=%d", os.Getpid())
 
 	var (
-		wasRunning    bool
-		lastHeartbeat time.Time
-		lastSync      time.Time
-		lastSig       map[string]fileSig
-		sigChangedAt  time.Time
-		pendingUpload bool
+		wasRunning     bool
+		lastHeartbeat  time.Time
+		lastSync       time.Time
+		lastScreenAt   time.Time
+		syncOnScreenOn bool
+		lastSig        map[string]fileSig
+		sigChangedAt   time.Time
+		pendingUpload  bool
+		pendingExit    bool // game exited but the sync failed/was deferred
 	)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -149,19 +369,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 	for {
 		changed, err := d.reloadConfig()
 		if err != nil {
-			d.status.LastError = err.Error()
-			d.writeStatus()
+			d.localErr = err.Error()
 		} else if changed {
 			if err := d.cfg.Validate(); err != nil {
 				d.Log.Printf("config: %v", err)
-				d.status.LastError = err.Error()
+				d.localErr = err.Error()
 				if d.pollStop != nil {
 					d.pollStop()
 					d.pollStop = nil
 				}
 			} else {
 				d.Log.Printf("config loaded: server=%s save=%q", d.cfg.ServerURL, d.cfg.SaveID)
-				d.status.LastError = ""
+				d.localErr = ""
+				d.backoff.Success()
 				d.startPoller(ctx)
 				lastSync = time.Time{}
 			}
@@ -171,6 +391,30 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if configured {
 			running := d.eng.Plat.GameRunning()
 			d.status.GameRunning = running
+
+			// Screen state: sampled every screenCheckInterval; the game running implies on.
+			if running {
+				d.setScreen(true)
+			} else if time.Since(lastScreenAt) >= screenCheckInterval {
+				lastScreenAt = time.Now()
+				on, ok := d.eng.Plat.ScreenOn()
+				if !ok {
+					on = true
+				}
+				if d.setScreen(on) {
+					if on {
+						d.Log.Print("screen on: resume syncing")
+						syncOnScreenOn = true
+					} else {
+						d.Log.Print("screen off: pause syncing")
+					}
+				}
+			}
+			d.screenMu.Lock()
+			screenOn := d.screenOn
+			d.screenMu.Unlock()
+			d.status.ScreenOn = screenOn
+
 			id, idErr := d.eng.SaveID()
 
 			switch {
@@ -184,8 +428,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				}
 			case !running && wasRunning:
 				d.Log.Print("game exited")
-				d.syncNow(ctx, SyncOptions{AllowUpload: true, AllowDownload: true})
-				lastSync = time.Now()
+				pendingExit = true
 				if idErr == nil && d.status.HoldingLock {
 					d.eng.Client.Unlock(ctx, id)
 				}
@@ -193,8 +436,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			wasRunning = running
 
+			// Uploading the final save after the game exits is done regardless
+			// of the screen state (progress must not be lost), but respects backoff.
+			if pendingExit && !running && d.backoff.Ready() {
+				if d.syncNow(ctx, SyncOptions{AllowUpload: true, AllowDownload: true}) {
+					pendingExit = false
+				}
+				lastSync = time.Now()
+			}
+
 			if running && idErr == nil {
-				if time.Since(lastHeartbeat) >= api.LockHeartbeat {
+				if time.Since(lastHeartbeat) >= api.LockHeartbeat && d.backoff.Ready() {
 					d.acquireLock(ctx, id, false)
 					lastHeartbeat = time.Now()
 				}
@@ -202,9 +454,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 				sig := d.saveSignature(id)
 				if !sigEqual(sig, lastSig) {
 					lastSig, sigChangedAt, pendingUpload = sig, time.Now(), true
-				} else if pendingUpload && time.Since(sigChangedAt) >= settleDuration {
-					pendingUpload = false
-					d.syncNow(ctx, SyncOptions{AllowUpload: true})
+				} else if pendingUpload && time.Since(sigChangedAt) >= settleDuration && d.backoff.Ready() {
+					if d.syncNow(ctx, SyncOptions{AllowUpload: true}) {
+						pendingUpload = false
+					}
 				}
 			}
 
@@ -217,7 +470,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 					d.syncNow(ctx, SyncOptions{}) // records pending + notifies
 				}
 			default:
-				if !running && time.Since(lastSync) >= periodicSync {
+				due := time.Since(lastSync) >= periodicSync || syncOnScreenOn
+				if !running && screenOn && due && d.backoff.Ready() {
+					// syncOnScreenOn: catch up immediately after waking, without
+					// waiting for the long-poll round trip.
+					syncOnScreenOn = false
 					d.syncNow(ctx, SyncOptions{AllowUpload: true, AllowDownload: d.cfg.AutoDownload})
 					lastSync = time.Now()
 				}
@@ -247,28 +504,39 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 }
 
-func (d *Daemon) syncNow(ctx context.Context, opt SyncOptions) {
+// syncNow runs a sync and updates backoff. Returns true on success.
+func (d *Daemon) syncNow(ctx context.Context, opt SyncOptions) bool {
 	res, err := d.eng.Sync(ctx, opt)
 	if err != nil {
-		d.status.Online = false
-		d.status.LastError = err.Error()
-		d.Log.Printf("sync error: %v", err)
-		return
+		// Only server errors back off; local errors (bad save id, unreadable files) don't.
+		if IsNetError(err) {
+			d.netFail("sync", err)
+		} else {
+			if d.localErr != err.Error() {
+				d.Log.Printf("sync error: %v", err)
+			}
+			d.localErr = err.Error()
+		}
+		return false
 	}
-	d.status.Online, d.status.LastError = true, ""
+	d.netOK()
+	d.localErr = ""
 	if res.Action != "none" && res.Action != "in_sync" {
 		d.Log.Printf("sync: %s %s", res.Action, res.Message)
 	}
+	return true
 }
 
 func (d *Daemon) acquireLock(ctx context.Context, id string, first bool) {
+	// Only SaveGameInfo is read here (not the multi-MB main save).
 	gameDate := ""
-	if s, _ := d.eng.LocalSnapshot(id); s != nil {
-		gameDate = s.Meta.GameDate()
+	if m := d.eng.LocalMeta(id); m != nil {
+		gameDate = m.GameDate()
 	}
 	lk, err := d.eng.Client.Lock(ctx, id, false, gameDate)
 	switch {
 	case errors.Is(err, client.ErrLocked):
+		d.netOK()
 		d.status.HoldingLock, d.status.OtherLock = false, lk
 		if first && lk != nil {
 			ago := time.Since(lk.LastHeartbeat).Round(time.Minute)
@@ -276,8 +544,9 @@ func (d *Daemon) acquireLock(ctx context.Context, id string, first bool) {
 				fmt.Sprintf("%s 正在游玩此存档（%s，%v 前活动），云端可能还有未上传的进度。", lk.Holder, lk.GameDate, ago))
 		}
 	case err != nil:
-		d.Log.Printf("lock: %v", err)
+		d.netFail("lock", err)
 	default:
+		d.netOK()
 		d.status.HoldingLock, d.status.OtherLock = true, nil
 	}
 }
