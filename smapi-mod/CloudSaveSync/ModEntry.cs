@@ -17,7 +17,13 @@ public sealed class ModEntry : Mod, ISyncHost
     private volatile LoadStage loadStage = LoadStage.None;
 
     /// <summary>A save is loaded or being loaded/created.</summary>
-    private bool SaveActive => this.loadStage != LoadStage.None;
+    private bool SaveActive => this.loadStage != LoadStage.None || Context.IsWorldReady;
+
+    /// <summary>
+    /// Joined someone else's farm as a farmhand. That farm's save lives only on the host's
+    /// device, so nothing must be synced, locked or auto-selected in this session.
+    /// </summary>
+    private static bool IsFarmhand => Context.IsWorldReady && !Context.IsMainPlayer;
 
     // ISyncHost
     public string SavesPath => Constants.SavesPath;
@@ -56,7 +62,7 @@ public sealed class ModEntry : Mod, ISyncHost
         string id = this.config.SaveId;
         if (string.IsNullOrWhiteSpace(id))
         {
-            if (this.SaveActive && !string.IsNullOrEmpty(Constants.SaveFolderName))
+            if (this.SaveActive && !IsFarmhand && !string.IsNullOrEmpty(Constants.SaveFolderName))
                 id = Constants.SaveFolderName!;
             else if (Directory.Exists(this.SavesPath))
             {
@@ -76,7 +82,7 @@ public sealed class ModEntry : Mod, ISyncHost
         return this.engine;
     }
 
-    private bool IsSyncedSave => this.engine != null && this.SaveActive && Constants.SaveFolderName == this.engine.SaveId;
+    private bool IsSyncedSave => this.engine != null && this.SaveActive && !IsFarmhand && Constants.SaveFolderName == this.engine.SaveId;
 
     /// <summary>Apply a download on the main thread only when no save is loaded.</summary>
     bool ISyncHost.TryApply(Action apply)
@@ -164,6 +170,11 @@ public sealed class ModEntry : Mod, ISyncHost
 
     private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
     {
+        if (IsFarmhand)
+        {
+            this.Monitor.Log("以农场帮手身份加入他人农场：本次会话不同步、不加游玩锁。", LogLevel.Info);
+            return;
+        }
         var eng = this.Engine();
         if (eng == null || !this.IsSyncedSave) return;
         this.heartbeatCounter = 0;
