@@ -71,6 +71,32 @@ func (e *Engine) LocalSnapshot(id string) (*savefmt.Snapshot, error) {
 	return &s, nil
 }
 
+// LocalMeta reads only SaveGameInfo (cheap); nil if missing or unreadable.
+func (e *Engine) LocalMeta(id string) *savefmt.Meta {
+	m, err := savefmt.ReadInfo(e.localDir(id))
+	if err != nil {
+		return nil
+	}
+	return &m
+}
+
+// NetError marks failures talking to the server (used by the daemon to back off).
+type NetError struct {
+	Op  string
+	Err error
+}
+
+func (e *NetError) Error() string { return e.Op + ": " + e.Err.Error() }
+func (e *NetError) Unwrap() error { return e.Err }
+
+func netErr(op string, err error) error { return &NetError{Op: op, Err: err} }
+
+// IsNetError reports whether err came from a server request.
+func IsNetError(err error) bool {
+	var ne *NetError
+	return errors.As(err, &ne)
+}
+
 // SyncOptions control what Sync may do.
 type SyncOptions struct {
 	AllowDownload bool
@@ -142,7 +168,7 @@ func (e *Engine) decide(ctx context.Context, id string, st *State, opt SyncOptio
 	switch {
 	case errors.Is(err, client.ErrNotFound):
 	case err != nil:
-		return Result{}, fmt.Errorf("查询云端: %w", err)
+		return Result{}, netErr("查询云端", err)
 	default:
 		remote = sum.Latest
 	}
@@ -193,7 +219,7 @@ func (e *Engine) upload(ctx context.Context, id string, st *State, force bool) (
 		return Result{Action: "pending", Message: ce.Error()}, nil
 	}
 	if err != nil {
-		return Result{}, fmt.Errorf("上传: %w", err)
+		return Result{}, netErr("上传", err)
 	}
 	st.BaseRevision, st.BaseHash, st.Conflict = ur.Revision.Rev, arc.Hash, nil
 	msg := fmt.Sprintf("已上传 #%d（%s）", ur.Revision.Rev, arc.Meta.GameDate())
@@ -222,7 +248,7 @@ func (e *Engine) download(ctx context.Context, id string, st *State, remote *api
 	}
 	data, err := e.Client.Download(ctx, id, remote.Rev)
 	if err != nil {
-		return Result{}, fmt.Errorf("下载: %w", err)
+		return Result{}, netErr("下载", err)
 	}
 	arc, err := savefmt.ReadArchive(data, id)
 	if err != nil {

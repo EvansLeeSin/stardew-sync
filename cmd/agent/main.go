@@ -135,12 +135,9 @@ func fail(err error) {
 	os.Exit(1)
 }
 
+// openLog returns sync.log, rotated to sync.log.1 whenever it exceeds 1 MiB.
 func openLog(dataDir string) io.Writer {
-	p := filepath.Join(dataDir, "sync.log")
-	if st, err := os.Stat(p); err == nil && st.Size() > 1<<20 {
-		os.Rename(p, p+".1")
-	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := agent.OpenRotating(filepath.Join(dataDir, "sync.log"), 1<<20)
 	if err != nil {
 		return os.Stderr
 	}

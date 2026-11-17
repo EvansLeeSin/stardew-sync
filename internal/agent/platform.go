@@ -21,6 +21,9 @@ type Platform interface {
 	// Apply atomically replaces <savesDir>/<id> with the archive content.
 	Apply(savesDir, id string, arc *savefmt.Archive) error
 	Notify(title, text string)
+	// ScreenOn reports whether the display is on. ok=false when unknown
+	// (callers should then assume the screen is on).
+	ScreenOn() (on bool, ok bool)
 }
 
 // AndroidPlatform is the real implementation used on the device.
@@ -45,6 +48,59 @@ func (p *AndroidPlatform) GameRunning() bool {
 		}
 	}
 	return false
+}
+
+var (
+	displayStateRe = regexp.MustCompile(`mScreenState=(\w+)|Display Power: state=(\w+)|mWakefulness=(\w+)`)
+	// backlight sysfs nodes, checked first because reading them is far cheaper than dumpsys
+	backlightGlobs = []string{
+		"/sys/class/backlight/*/brightness",
+		"/sys/class/leds/lcd-backlight/brightness",
+	}
+)
+
+// ScreenOn checks the backlight via sysfs, falling back to dumpsys.
+func (p *AndroidPlatform) ScreenOn() (bool, bool) {
+	for _, g := range backlightGlobs {
+		matches, _ := filepath.Glob(g)
+		for _, m := range matches {
+			b, err := os.ReadFile(m)
+			if err != nil {
+				continue
+			}
+			v := strings.TrimSpace(string(b))
+			if v == "" {
+				continue
+			}
+			return v != "0", true
+		}
+	}
+	for _, args := range [][]string{{"power"}, {"display"}} {
+		out, err := exec.Command("dumpsys", args...).Output()
+		if err != nil {
+			continue
+		}
+		if on, ok := parseScreenState(string(out)); ok {
+			return on, true
+		}
+	}
+	return true, false
+}
+
+// parseScreenState interprets dumpsys power/display output.
+func parseScreenState(out string) (bool, bool) {
+	m := displayStateRe.FindStringSubmatch(out)
+	if m == nil {
+		return true, false
+	}
+	v := strings.ToUpper(m[1] + m[2] + m[3])
+	switch v {
+	case "ON", "AWAKE", "DREAMING":
+		return true, true
+	case "OFF", "ASLEEP", "DOZE", "DOZE_SUSPEND":
+		return false, true
+	}
+	return true, false
 }
 
 var versionNameRe = regexp.MustCompile(`versionName=([^\s]+)`)

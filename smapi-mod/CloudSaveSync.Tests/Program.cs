@@ -28,6 +28,16 @@ void WriteSave(string saves, int day, string ver = "1.6.15")
     File.WriteAllText(Path.Combine(d, sid), $"<SaveGame day='{day}'/>");
     File.WriteAllText(Path.Combine(d, "SaveGameInfo"), Info(day, ver));
 }
+void CheckReadInfo()
+{
+    string d = Path.Combine(root, "ri"); Directory.CreateDirectory(d);
+    Check(SaveFormat.ReadInfo(d) == null, "ReadInfo missing -> null");
+    File.WriteAllText(Path.Combine(d, "SaveGameInfo"), Info(7));
+    Check(SaveFormat.ReadInfo(d)?.Day == 7, "ReadInfo reads SaveGameInfo only (no main save file)");
+    File.WriteAllText(Path.Combine(d, "SaveGameInfo"), "<Farmer><name>");
+    Check(SaveFormat.ReadInfo(d) == null, "ReadInfo malformed -> null");
+}
+CheckReadInfo();
 int Day(string saves) => SaveFormat.ReadDir(Path.Combine(saves, sid), sid)!.Meta.Day;
 
 if (args.Length == 3)

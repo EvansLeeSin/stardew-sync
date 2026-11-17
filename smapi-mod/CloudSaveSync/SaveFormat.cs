@@ -88,6 +88,20 @@ public static class SaveFormat
         return new Snapshot(Hash(main, info), ParseInfo(info));
     }
 
+    /// <summary>Parse only SaveGameInfo (small) for metadata; null if missing/unreadable.</summary>
+    public static Meta? ReadInfo(string dir)
+    {
+        try
+        {
+            string infoPath = Path.Combine(dir, InfoFile);
+            return File.Exists(infoPath) ? ParseInfo(File.ReadAllBytes(infoPath)) : null;
+        }
+        catch (Exception ex) when (ex is IOException or System.Xml.XmlException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
     public static byte[] PackDir(string dir)
     {
         using var ms = new MemoryStream();
